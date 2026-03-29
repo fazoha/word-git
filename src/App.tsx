@@ -678,6 +678,7 @@ export default function App() {
                   }
                 : null
             }
+            coauthorApiBaseUrl={collabServerUrl}
           />
           <WorkflowActionPanel
             documents={officialDocuments}

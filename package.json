@@ -7,6 +7,8 @@
     "dev": "vite",
     "collab": "npm run start --prefix server",
     "dev:full": "concurrently -k \"npm run collab\" \"vite\"",
+    "dev:double": "concurrently -k -n collab,i1,i2 -c blue,green,yellow \"npm run collab\" \"npm run dev -- --port 5174 --strictPort\" \"npm run dev -- --port 5175 --strictPort\"",
+    "dev:triple": "concurrently -k -n collab,i1,i2,i3 -c blue,green,yellow,magenta \"npm run collab\" \"npm run dev -- --port 5174 --strictPort\" \"npm run dev -- --port 5175 --strictPort\" \"npm run dev -- --port 5176 --strictPort\"",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

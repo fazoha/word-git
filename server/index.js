@@ -1,9 +1,18 @@
 import http from 'http'
 import { randomUUID } from 'crypto'
+import { fileURLToPath } from 'url'
+import path from 'path'
+import { config } from 'dotenv'
 import { Server } from 'socket.io'
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url))
+config({ path: path.resolve(__dirname, '..', '.env') })
 
 const PORT = Number(process.env.PORT) || 3030
 const MAX_MEMBERS = 3
+const OPENAI_KEY = process.env.OPENAI_API_KEY
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini'
+const MAX_SECTION_CHARS = 28_000
 
 /** @typedef {{ socketId: string, displayName: string, role: 'owner' | 'editor' }} Member */
 /** @typedef {{ id: string, fromSocketId: string, fromName: string, workspaceId: string, submittedAt: string, workingDocument: object }} PendingReview */
@@ -38,9 +47,140 @@ function snapshot(room) {
   }
 }
 
-const httpServer = http.createServer((req, res) => {
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
+    req.on('error', reject)
+  })
+}
+
+function corsHeaders(req) {
+  const origin = req.headers.origin
+  const h = {
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  }
+  if (origin) {
+    h['Access-Control-Allow-Origin'] = origin
+    h['Access-Control-Allow-Credentials'] = 'true'
+  } else {
+    h['Access-Control-Allow-Origin'] = '*'
+  }
+  return h
+}
+
+async function handleCoauthor(req, res) {
+  const headers = { 'Content-Type': 'application/json', ...corsHeaders(req) }
+
+  if (!OPENAI_KEY?.trim()) {
+    res.writeHead(503, headers)
+    res.end(
+      JSON.stringify({
+        error: 'Server missing OPENAI_API_KEY. Add it to the project .env and restart npm run collab.',
+      }),
+    )
+    return
+  }
+
+  let body
+  try {
+    const raw = await readBody(req)
+    body = JSON.parse(raw || '{}')
+  } catch {
+    res.writeHead(400, headers)
+    res.end(JSON.stringify({ error: 'Invalid JSON body' }))
+    return
+  }
+
+  const title = typeof body.title === 'string' ? body.title.trim() : ''
+  const excerpt = body.excerpt === true
+  let text = typeof body.body === 'string' ? body.body : ''
+  if (!text.trim()) {
+    res.writeHead(400, headers)
+    res.end(JSON.stringify({ error: 'Missing body text' }))
+    return
+  }
+  let truncated = false
+  if (text.length > MAX_SECTION_CHARS) {
+    text = text.slice(0, MAX_SECTION_CHARS)
+    truncated = true
+  }
+
+  const userContent = excerpt
+    ? `Contract section (for context): "${title || '(untitled)'}"
+
+The user highlighted ONLY this excerpt. Analyze **only** this passage — do not infer missing surrounding text:
+"""${text}"""${truncated ? '\n\n(Note: excerpt was truncated for this request.)' : ''}`
+    : `Section title: ${title || '(untitled)'}\n\nClause text:\n"""${text}"""${truncated ? '\n\n(Note: text was truncated for this request.)' : ''}`
+
+  const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${OPENAI_KEY.trim()}`,
+    },
+    body: JSON.stringify({
+      model: OPENAI_MODEL,
+      temperature: 0.35,
+      max_tokens: 1200,
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are Co-Author, a careful contract-review assistant. Read the clause and respond in Markdown with exactly two sections:\n\n## Issues\n- Bullet list of potential problems, ambiguous language, imbalance, or missing protections. If none stand out, say: - None significant for a quick pass.\n\n## Suggestions\n- Bullet list of concrete, actionable edits or negotiation points.\n\nBe concise. Output Markdown only. This is not legal advice.',
+        },
+        { role: 'user', content: userContent },
+      ],
+    }),
+  })
+
+  const data = await openaiRes.json().catch(() => ({}))
+  if (!openaiRes.ok) {
+    const msg = data?.error?.message || openaiRes.statusText || 'OpenAI request failed'
+    res.writeHead(openaiRes.status >= 400 && openaiRes.status < 600 ? openaiRes.status : 502, headers)
+    res.end(JSON.stringify({ error: msg }))
+    return
+  }
+
+  const reply = data?.choices?.[0]?.message?.content?.trim()
+  if (!reply) {
+    res.writeHead(502, headers)
+    res.end(JSON.stringify({ error: 'Empty response from model' }))
+    return
+  }
+
+  res.writeHead(200, headers)
+  res.end(JSON.stringify({ markdown: reply, model: OPENAI_MODEL, truncated }))
+}
+
+async function handleHttp(req, res) {
+  const url = req.url?.split('?')[0] || ''
+
+  if (req.method === 'OPTIONS' && url === '/api/coauthor') {
+    res.writeHead(204, corsHeaders(req))
+    res.end()
+    return
+  }
+
+  if (req.method === 'POST' && url === '/api/coauthor') {
+    try {
+      await handleCoauthor(req, res)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Co-Author request failed'
+      res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders(req) })
+      res.end(JSON.stringify({ error: msg }))
+    }
+    return
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain' })
   res.end('Spellbook collaboration server')
+}
+
+const httpServer = http.createServer((req, res) => {
+  void handleHttp(req, res)
 })
 
 const io = new Server(httpServer, {
@@ -141,7 +281,6 @@ io.on('connection', (socket) => {
       submittedAt: new Date().toISOString(),
       workingDocument: cloneDoc(workingDocument),
     }
-    // One pending review per editor per workspace (avoids duplicate client emits, e.g. React Strict Mode).
     room.pendingReviews = room.pendingReviews.filter(
       (r) => !(r.fromSocketId === socket.id && r.workspaceId === workspaceId),
     )
@@ -182,4 +321,7 @@ io.on('connection', (socket) => {
 
 httpServer.listen(PORT, () => {
   console.log(`[spellbook-collab] listening on :${PORT}`)
+  if (!OPENAI_KEY?.trim()) {
+    console.warn('[spellbook-collab] OPENAI_API_KEY missing — POST /api/coauthor will return 503')
+  }
 })

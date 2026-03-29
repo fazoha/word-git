@@ -36,6 +36,8 @@ type MainDocumentAreaProps = {
     onAcceptSection: (sectionId: string) => void
     onRejectSection: (sectionId: string) => void
   } | null
+  /** Collab server base URL; Co-Author calls POST /api/coauthor there. */
+  coauthorApiBaseUrl?: string | null
 }
 
 function workspaceBadge(
@@ -69,6 +71,7 @@ export function MainDocumentArea({
   onRebaseChoose,
   onApplyRebaseMerge,
   collabOwnerReview,
+  coauthorApiBaseUrl,
 }: MainDocumentAreaProps) {
   const { label, tone } = workspaceBadge(isWorkingCopy, workingStatus, collabOwnerReview)
   const inReview = (isWorkingCopy && workingStatus === 'in_review') || Boolean(collabOwnerReview)
@@ -102,16 +105,6 @@ export function MainDocumentArea({
           </button>
         </div>
       ) : null}
-      {inReview ? (
-        <div
-          className="shrink-0 border-b border-violet-200 bg-violet-50 px-6 py-3 text-center text-sm font-medium text-violet-900"
-          role="status"
-        >
-          {collabOwnerReview
-            ? 'You are reviewing a collaborator’s submission. Overlapping sections are flagged with a three-way view (base, your official, their text). Accept or reject each changed section, then merge into the shared official version.'
-            : 'Compare versions below. Accept or reject each changed section, then use Make Official to merge.'}
-        </div>
-      ) : null}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-8 md:px-8 md:py-10">
         {inReview ? (
           <ReviewCompareView
@@ -139,6 +132,7 @@ export function MainDocumentArea({
               isWorkingCopy && workingStatus === 'editing' ? officialDocument : undefined
             }
             onSectionBodyChange={onSectionBodyChange}
+            coauthorApiBase={coauthorApiBaseUrl}
           />
         )}
       </div>
